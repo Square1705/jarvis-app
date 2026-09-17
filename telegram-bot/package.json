@@ -1,0 +1,17 @@
+{
+  "name": "jarvis-telegram-bot",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.126.0",
+    "@supabase/supabase-js": "^2.116.0",
+    "dotenv": "^18.0.0",
+    "node-cron": "^4.6.0",
+    "node-telegram-bot-api": "^2.1.0"
+  }
+}

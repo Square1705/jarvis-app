@@ -10,7 +10,7 @@ function extractText(content) {
     .trim()
 }
 
-function ChatView({ messages, loading, error, input, onInputChange, onSubmit }) {
+function ChatView({ messages, loading, error, input, onInputChange, onSubmit, topSlot }) {
   const scrollRef = useRef(null)
 
   useEffect(() => {
@@ -21,6 +21,7 @@ function ChatView({ messages, loading, error, input, onInputChange, onSubmit }) 
 
   return (
     <div className="chat-view">
+      {topSlot}
       <div className="chat" ref={scrollRef}>
         {visible.map((m, i) => {
           if (m.role === 'user' && typeof m.content === 'string') {

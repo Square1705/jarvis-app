@@ -6,6 +6,10 @@ import ChatView from './components/ChatView'
 import DashboardView from './components/DashboardView'
 import NegociosWidget from './components/NegociosWidget'
 import FinanzasWidget from './components/FinanzasWidget'
+import DailyBriefing from './components/DailyBriefing'
+import CheckinPrompt from './components/CheckinPrompt'
+import InsightsPanel from './components/InsightsPanel'
+import CalendarPlaceholder from './components/CalendarPlaceholder'
 import './App.css'
 
 // --- Config ---------------------------------------------------------------
@@ -27,16 +31,17 @@ const NAV_TABS = [
 ]
 
 const DEFAULT_NEGOCIOS = {
-  rayban: { label: 'Ray-Ban Cámara', icon: '🕶️', stock: 0, porCobrar: 0 },
-  iphone: { label: 'iPhones', icon: '📱', stock: 0, porCobrar: 0 },
+  rayban: { label: 'Ray-Ban Cámara', icon: '🕶️', stock: 0, porCobrar: 0, precioPromedio: 0 },
+  iphone: { label: 'iPhones', icon: '📱', stock: 0, porCobrar: 0, precioPromedio: 0 },
 }
 
 const KICKOFF_PROMPT =
   'Es el inicio de una nueva sesión. Saluda a Gonzalo de forma breve y natural. ' +
   'Si hay pendientes vencidos, sin fecha límite, o que vencen en los próximos 2 días, ' +
-  'menciónalos proactivamente y sugiere cómo abordarlos. Si no hay nada urgente, ' +
-  'solo saluda y pregúntale en qué le ayudas hoy. No necesitas usar listar_pendientes ' +
-  'para esto, ya tienes el contexto completo en tus instrucciones.'
+  'menciónalos proactivamente y sugiere cómo abordarlos. Si hay pendientes sin fecha ' +
+  'creados hace más de 3 días, pregúntale directamente qué fecha les pone. Si no hay ' +
+  'nada urgente, solo saluda y pregúntale en qué le ayudas hoy. No necesitas usar ' +
+  'listar_pendientes para esto, ya tienes el contexto completo en tus instrucciones.'
 
 // --- Tools (function calling) ---------------------------------------------
 
@@ -102,20 +107,21 @@ const TOOLS = [
   {
     name: 'actualizar_negocio',
     description:
-      'Actualiza el stock o el monto por cobrar de uno de los negocios de Gonzalo ' +
-      '(Ray-Ban cámara o iPhones). Úsala cuando mencione una venta, una compra de ' +
-      'mercadería, o un cobro.',
+      'Actualiza el stock, el monto por cobrar, o el precio promedio de venta de uno ' +
+      'de los negocios de Gonzalo (Ray-Ban cámara o iPhones). Úsala cuando mencione una ' +
+      'venta, una compra de mercadería, un cobro, o te diga a cuánto vende cada uno.',
     input_schema: {
       type: 'object',
       properties: {
         producto: { type: 'string', enum: ['rayban', 'iphone'] },
-        campo: { type: 'string', enum: ['stock', 'porCobrar'] },
+        campo: { type: 'string', enum: ['stock', 'porCobrar', 'precioPromedio'] },
         operacion: {
           type: 'string',
           enum: ['set', 'sumar', 'restar'],
           description:
             "'sumar'/'restar' para ajustes relativos (ej: vendió 2 unidades -> restar 2 " +
-            "al stock, sumar el monto a porCobrar). 'set' para fijar un valor exacto.",
+            "al stock, sumar el monto a porCobrar). 'set' para fijar un valor exacto " +
+            "(úsalo siempre para precioPromedio, ej: 'el Ray-Ban lo vendo en 180 soles').",
         },
         valor: { type: 'number' },
       },
@@ -189,7 +195,15 @@ function rowToTodo(row) {
     priority: row.priority,
     dueDate: row.due_date,
     done: row.done,
+    createdAt: row.created_at,
   }
+}
+
+// Registro liviano para el análisis semanal de patrones (Insights). No
+// bloquea la UI si falla — es informativo, no crítico.
+function logActivity(userId, tipo, detalle) {
+  if (!supabase || !userId) return
+  supabase.from('activity_log').insert({ user_id: userId, tipo, detalle: detalle || {} }).then(() => {})
 }
 
 function rowToMovimiento(row) {
@@ -203,9 +217,10 @@ function rowToMovimiento(row) {
   }
 }
 
-function buildSystemPrompt(state) {
+function buildSystemPrompt(state, mood) {
   const { todos, negocios, finanzas } = state
   const today = todayStr()
+  const staleLimit = addDays(today, -3)
 
   const pendientesTexto =
     todos.length === 0
@@ -216,6 +231,14 @@ function buildSystemPrompt(state) {
               `- [${t.done ? 'x' : ' '}] id:${t.id} | ${t.area} | ${t.text} | prioridad:${t.priority} | vence:${t.dueDate || 'sin fecha'}`,
           )
           .join('\n')
+
+  const staleSinFecha = todos.filter(
+    (t) => !t.done && !t.dueDate && t.createdAt && t.createdAt.slice(0, 10) <= staleLimit,
+  )
+  const staleTexto =
+    staleSinFecha.length === 0
+      ? '(ninguno)'
+      : staleSinFecha.map((t) => `- id:${t.id} | ${t.area} | ${t.text}`).join('\n')
 
   const confirmados = finanzas.movimientos.filter((m) => m.confirmado)
   const proyectados = finanzas.movimientos.filter((m) => !m.confirmado)
@@ -258,10 +281,13 @@ FECHA DE HOY: ${today}
 PENDIENTES ACTUALES (usa el "id" exacto para completar_pendiente / eliminar_pendiente):
 ${pendientesTexto}
 
-NEGOCIOS (stock y cobros pendientes):
-- Ray-Ban Cámara: stock=${negocios.rayban.stock}, por cobrar=S/ ${negocios.rayban.porCobrar}
-- iPhones: stock=${negocios.iphone.stock}, por cobrar=S/ ${negocios.iphone.porCobrar}
+PENDIENTES SIN FECHA CREADOS HACE MÁS DE 3 DÍAS (pregúntale proactivamente qué fecha ponerles):
+${staleTexto}
 
+NEGOCIOS (stock, cobros pendientes y proyección de ingreso si vendiera todo el stock actual):
+- Ray-Ban Cámara: stock=${negocios.rayban.stock}, por cobrar=S/ ${negocios.rayban.porCobrar}, precio promedio=S/ ${negocios.rayban.precioPromedio}, proyección=S/ ${(negocios.rayban.stock * negocios.rayban.precioPromedio).toFixed(2)}
+- iPhones: stock=${negocios.iphone.stock}, por cobrar=S/ ${negocios.iphone.porCobrar}, precio promedio=S/ ${negocios.iphone.precioPromedio}, proyección=S/ ${(negocios.iphone.stock * negocios.iphone.precioPromedio).toFixed(2)}
+${mood ? `\nESTADO DE ÁNIMO HOY (que Gonzalo reportó, 1-5): ${mood}/5 — ajusta tu tono según esto (si está bajo, sé más breve y considerado; si está alto, puedes ser más directo).\n` : ''}
 FINANZAS:
 - Saldo actual (solo movimientos confirmados, dinero que ya se movió de verdad): S/ ${saldoConf.toFixed(2)}
 - Movimientos confirmados recientes:
@@ -273,7 +299,8 @@ ${proyectadosTexto}
 CÓMO DEBES COMPORTARTE:
 - Cuando Gonzalo mencione algo que tiene que hacer/resolver, créalo como pendiente con crear_pendiente (elige el área correcta: trabajo, negocios, personal o finanzas).
 - Si no da fecha límite, sugiere tú una fecha razonable según la urgencia y dilo explícitamente en tu respuesta (ej: "le puse fecha para el viernes porque...").
-- Cuando mencione una venta, cobro o cambio de stock de Ray-Ban/iPhone, usa actualizar_negocio.
+- Cuando mencione una venta, cobro, cambio de stock, o a cuánto vende cada producto de Ray-Ban/iPhone, usa actualizar_negocio.
+- Si hay pendientes sin fecha creados hace más de 3 días, pregúntale proactivamente qué fecha ponerles.
 - Cuando mencione dinero que YA se movió (ya gastó, ya pagó, ya le depositaron, ya cobró), usa registrar_movimiento con confirmado=true.
 - Cuando mencione algo que PROBABLEMENTE o PLANEA gastar/recibir a futuro (ej: "probablemente gaste 1800 mañana", "voy a cobrar 500 la próxima semana"), usa registrar_movimiento con confirmado=false — es una proyección, NO debe contarse como saldo ya gastado. Ante la duda, usa false.
 - Cuando Gonzalo confirme que una proyección ya sucedió de verdad ("ya gasté eso que dije", "sí se dio el pago"), usa confirmar_movimiento con su id en vez de crear un movimiento nuevo.
@@ -307,6 +334,7 @@ async function executeTool(name, input, state, userId) {
         .single()
       if (error || !data) return { state, result: { ok: false, error: error?.message || 'error al guardar' } }
       const nuevo = rowToTodo(data)
+      logActivity(userId, 'pendiente_creado', { id: nuevo.id, area: nuevo.area, texto: nuevo.text })
       return { state: { ...state, todos: [...todos, nuevo] }, result: { ok: true, pendiente: nuevo } }
     }
 
@@ -320,6 +348,7 @@ async function executeTool(name, input, state, userId) {
         .single()
       if (error || !data) return { state, result: { ok: false, error: 'id no encontrado' } }
       const actualizado = rowToTodo(data)
+      logActivity(userId, 'pendiente_completado', { id: actualizado.id, area: actualizado.area })
       return {
         state: { ...state, todos: todos.map((t) => (t.id === actualizado.id ? actualizado : t)) },
         result: { ok: true, pendiente: actualizado },
@@ -355,13 +384,28 @@ async function executeTool(name, input, state, userId) {
       siguiente = Math.max(0, siguiente)
 
       const nextBiz = { ...negocios[input.producto], [input.campo]: siguiente }
-      const { error } = await supabase
-        .from('negocios')
-        .upsert(
-          { user_id: userId, producto: input.producto, stock: nextBiz.stock, por_cobrar: nextBiz.porCobrar },
-          { onConflict: 'user_id,producto' },
-        )
+      // Si el stock vuelve a subir de 0, reseteamos la bandera de "ya avisé
+      // que se acabó" para que el bot pueda volver a alertar la próxima vez.
+      const stockZeroNotified = nextBiz.stock > 0 ? false : undefined
+      const { error } = await supabase.from('negocios').upsert(
+        {
+          user_id: userId,
+          producto: input.producto,
+          stock: nextBiz.stock,
+          por_cobrar: nextBiz.porCobrar,
+          precio_promedio: nextBiz.precioPromedio,
+          ...(stockZeroNotified !== undefined ? { stock_zero_notified: stockZeroNotified } : {}),
+        },
+        { onConflict: 'user_id,producto' },
+      )
       if (error) return { state, result: { ok: false, error: error.message } }
+
+      logActivity(userId, 'negocio_actualizado', {
+        producto: input.producto,
+        campo: input.campo,
+        valorAnterior: actual,
+        valorNuevo: siguiente,
+      })
 
       return {
         state: { ...state, negocios: { ...negocios, [input.producto]: nextBiz } },
@@ -384,6 +428,12 @@ async function executeTool(name, input, state, userId) {
         .single()
       if (error || !data) return { state, result: { ok: false, error: error?.message || 'error al guardar' } }
       const nuevo = rowToMovimiento(data)
+      logActivity(userId, 'movimiento_registrado', {
+        id: nuevo.id,
+        tipo: nuevo.tipo,
+        monto: nuevo.monto,
+        confirmado: nuevo.confirmado,
+      })
       return {
         state: { ...state, finanzas: { ...finanzas, movimientos: [nuevo, ...finanzas.movimientos] } },
         result: { ok: true, movimiento: nuevo },
@@ -469,13 +519,21 @@ function App() {
   const [notifEnabled, setNotifEnabled] = useState(
     typeof Notification !== 'undefined' && Notification.permission === 'granted',
   )
+  const [todayMood, setTodayMood] = useState(null)
+  const [latestInsight, setLatestInsight] = useState(null)
+  const [insightsLoading, setInsightsLoading] = useState(false)
 
   const stateRef = useRef({ todos, negocios, finanzas })
+  const moodRef = useRef(null)
   const kickoffFired = useRef(false)
 
   useEffect(() => {
     stateRef.current = { todos, negocios, finanzas }
   }, [todos, negocios, finanzas])
+
+  useEffect(() => {
+    moodRef.current = todayMood
+  }, [todayMood])
 
   // --- Auth ---
   useEffect(() => {
@@ -509,12 +567,21 @@ function App() {
 
     async function loadAll() {
       const userId = session.user.id
+      const today = todayStr()
 
-      const [todosRes, negociosRes, movRes, msgRes] = await Promise.all([
+      const [todosRes, negociosRes, movRes, msgRes, checkinRes, insightRes] = await Promise.all([
         supabase.from('todos').select('*').eq('user_id', userId).order('created_at'),
         supabase.from('negocios').select('*').eq('user_id', userId),
         supabase.from('movimientos').select('*').eq('user_id', userId).order('created_at', { ascending: false }),
         supabase.from('chat_messages').select('*').eq('user_id', userId).order('created_at'),
+        supabase.from('checkins').select('*').eq('user_id', userId).eq('fecha', today).maybeSingle(),
+        supabase
+          .from('insights')
+          .select('*')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
       ])
 
       if (cancelled) return
@@ -528,6 +595,7 @@ function App() {
             ...negociosMap[row.producto],
             stock: Number(row.stock),
             porCobrar: Number(row.por_cobrar),
+            precioPromedio: Number(row.precio_promedio || 0),
           }
         }
       }
@@ -545,6 +613,9 @@ function App() {
       setMessages(
         (msgRes.data || []).map((m) => ({ role: m.role, content: m.content, hidden: m.hidden })),
       )
+
+      setTodayMood(checkinRes.data?.mood ?? null)
+      setLatestInsight(insightRes.data || null)
 
       setDataLoaded(true)
     }
@@ -580,7 +651,7 @@ function App() {
     try {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         const response = await callClaude({
-          system: buildSystemPrompt(workingState),
+          system: buildSystemPrompt(workingState, moodRef.current),
           tools: TOOLS,
           messages: toApiMessages(currentMessages),
         })
@@ -655,6 +726,7 @@ function App() {
     const nextDone = !todo.done
     setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: nextDone } : t)))
     await supabase.from('todos').update({ done: nextDone }).eq('id', id)
+    if (nextDone) logActivity(session.user.id, 'pendiente_completado', { id, area: todo.area })
   }
 
   async function deleteTodo(id) {
@@ -669,7 +741,10 @@ function App() {
       .insert({ user_id: userId, area, text, priority, due_date: dueDate || null, done: false })
       .select()
       .single()
-    if (!error && data) setTodos((prev) => [...prev, rowToTodo(data)])
+    if (!error && data) {
+      setTodos((prev) => [...prev, rowToTodo(data)])
+      logActivity(userId, 'pendiente_creado', { id: data.id, area, texto: text })
+    }
   }
 
   async function updateNegocio(productKey, field, rawValue) {
@@ -677,9 +752,17 @@ function App() {
     const next = { ...negocios[productKey], [field]: value }
     setNegocios((prev) => ({ ...prev, [productKey]: next }))
     await supabase.from('negocios').upsert(
-      { user_id: session.user.id, producto: productKey, stock: next.stock, por_cobrar: next.porCobrar },
+      {
+        user_id: session.user.id,
+        producto: productKey,
+        stock: next.stock,
+        por_cobrar: next.porCobrar,
+        precio_promedio: next.precioPromedio,
+        ...(field === 'stock' && value > 0 ? { stock_zero_notified: false } : {}),
+      },
       { onConflict: 'user_id,producto' },
     )
+    logActivity(session.user.id, 'negocio_actualizado', { producto: productKey, campo: field, valor: value })
   }
 
   async function addMovimiento({ tipo, monto, concepto, confirmado }) {
@@ -698,6 +781,7 @@ function App() {
       .single()
     if (!error && data) {
       setFinanzas((prev) => ({ movimientos: [rowToMovimiento(data), ...prev.movimientos] }))
+      logActivity(userId, 'movimiento_registrado', { id: data.id, tipo, monto: Number(monto) || 0, confirmado: confirmado !== false })
     }
   }
 
@@ -711,6 +795,73 @@ function App() {
       movimientos: prev.movimientos.map((m) => (m.id === id ? { ...m, confirmado: true } : m)),
     }))
     await supabase.from('movimientos').update({ confirmado: true }).eq('id', id)
+  }
+
+  async function submitCheckin(mood) {
+    const userId = session.user.id
+    const fecha = todayStr()
+    const { data, error } = await supabase
+      .from('checkins')
+      .upsert({ user_id: userId, fecha, mood }, { onConflict: 'user_id,fecha' })
+      .select()
+      .single()
+    if (!error) {
+      setTodayMood(data?.mood ?? mood)
+      logActivity(userId, 'checkin', { mood })
+    }
+  }
+
+  async function generateInsights() {
+    if (!session) return
+    setInsightsLoading(true)
+    try {
+      const userId = session.user.id
+      const desde = addDays(todayStr(), -7)
+      const hoy = todayStr()
+      const { data: logs } = await supabase
+        .from('activity_log')
+        .select('*')
+        .eq('user_id', userId)
+        .gte('created_at', `${desde}T00:00:00`)
+        .order('created_at')
+
+      const resumenTexto =
+        !logs || logs.length === 0
+          ? '(sin actividad registrada en los últimos 7 días)'
+          : logs
+              .map((l) => `- ${l.created_at.slice(0, 10)} | ${l.tipo} | ${JSON.stringify(l.detalle)}`)
+              .join('\n')
+
+      const prompt =
+        'Analiza esta bitácora de actividad de los últimos 7 días de Gonzalo y dame patrones ' +
+        'concretos y accionables: días más productivos, en qué categorías gasta más, hábitos ' +
+        'que notas. Máximo 6 líneas, directo, sin relleno, en español.\n\n' +
+        resumenTexto
+
+      const response = await callClaude({
+        system: 'Eres JARVIS, el asistente de vida personal de Gonzalo. Responde directo y breve.',
+        messages: [{ role: 'user', content: prompt }],
+      })
+
+      const contenido =
+        (response.content || [])
+          .filter((b) => b.type === 'text')
+          .map((b) => b.text)
+          .join('\n')
+          .trim() || 'No pude generar el análisis esta vez.'
+
+      const { data } = await supabase
+        .from('insights')
+        .insert({ user_id: userId, periodo_inicio: desde, periodo_fin: hoy, contenido })
+        .select()
+        .single()
+
+      setLatestInsight(data || { periodo_inicio: desde, periodo_fin: hoy, contenido })
+    } catch {
+      // silencioso: si falla, el panel simplemente no se actualiza
+    } finally {
+      setInsightsLoading(false)
+    }
   }
 
   if (authLoading) {
@@ -783,6 +934,12 @@ function App() {
             input={input}
             onInputChange={setInput}
             onSubmit={handleChatSubmit}
+            topSlot={
+              <>
+                <DailyBriefing todos={todos} negocios={negocios} finanzas={finanzas} />
+                {todayMood === null && <CheckinPrompt onSubmit={submitCheckin} />}
+              </>
+            }
           />
         )}
 
@@ -797,12 +954,21 @@ function App() {
               activeArea.key === 'negocios' ? (
                 <NegociosWidget negocios={negocios} onUpdate={updateNegocio} />
               ) : activeArea.key === 'finanzas' ? (
-                <FinanzasWidget
-                  movimientos={finanzas.movimientos}
-                  onAdd={addMovimiento}
-                  onDelete={deleteMovimiento}
-                  onConfirm={confirmMovimiento}
-                />
+                <>
+                  <FinanzasWidget
+                    movimientos={finanzas.movimientos}
+                    onAdd={addMovimiento}
+                    onDelete={deleteMovimiento}
+                    onConfirm={confirmMovimiento}
+                  />
+                  <InsightsPanel
+                    insight={latestInsight}
+                    loading={insightsLoading}
+                    onGenerate={generateInsights}
+                  />
+                </>
+              ) : activeArea.key === 'personal' ? (
+                <CalendarPlaceholder />
               ) : null
             }
           />

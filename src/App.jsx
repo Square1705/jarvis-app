@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import Anthropic from '@anthropic-ai/sdk'
+import { supabase } from './lib/supabaseClient'
+import Login from './components/Login'
 import BottomNav from './components/BottomNav'
 import ChatView from './components/ChatView'
 import DashboardView from './components/DashboardView'
@@ -9,15 +10,7 @@ import './App.css'
 
 // --- Config ---------------------------------------------------------------
 
-const MODEL_ID = 'claude-sonnet-4-6'
 const MAX_TOOL_TURNS = 6
-
-const TODOS_KEY = 'jarvis_todos_v3'
-const NEGOCIOS_KEY = 'jarvis_negocios_v1'
-const FINANZAS_KEY = 'jarvis_finanzas_v1'
-const LEGACY_TODOS_KEY_V2 = 'jarvis_state_v2'
-const LEGACY_TODOS_KEY_V1 = 'jarvis_areas_v1'
-const CHAT_KEY = 'jarvis_chat_v1'
 
 const AREA_CONFIG = [
   { key: 'trabajo', label: 'Trabajo', icon: '💼', color: '#22d3ee' },
@@ -38,15 +31,6 @@ const DEFAULT_NEGOCIOS = {
   iphone: { label: 'iPhones', icon: '📱', stock: 0, porCobrar: 0 },
 }
 
-// API key expuesta al bundle del navegador vía Vite. Esto es intencional
-// para esta app personal (sin backend todavía): cualquiera que abra las
-// devtools de esta página puede ver la key. No despliegues esto público
-// sin mover la llamada a un backend/proxy.
-const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY
-const client = apiKey
-  ? new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
-  : null
-
 const KICKOFF_PROMPT =
   'Es el inicio de una nueva sesión. Saluda a Gonzalo de forma breve y natural. ' +
   'Si hay pendientes vencidos, sin fecha límite, o que vencen en los próximos 2 días, ' +
@@ -65,11 +49,7 @@ const TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        area: {
-          type: 'string',
-          enum: AREAS,
-          description: 'Área de vida a la que pertenece el pendiente.',
-        },
+        area: { type: 'string', enum: AREAS, description: 'Área de vida a la que pertenece.' },
         texto: { type: 'string', description: 'Descripción breve del pendiente.' },
         prioridad: {
           type: 'string',
@@ -92,9 +72,7 @@ const TOOLS = [
     description: 'Marca un pendiente existente como completado, dado su id.',
     input_schema: {
       type: 'object',
-      properties: {
-        id: { type: 'string', description: 'id del pendiente a completar.' },
-      },
+      properties: { id: { type: 'string', description: 'id del pendiente a completar.' } },
       required: ['id'],
     },
   },
@@ -103,9 +81,7 @@ const TOOLS = [
     description: 'Elimina un pendiente existente, dado su id.',
     input_schema: {
       type: 'object',
-      properties: {
-        id: { type: 'string', description: 'id del pendiente a eliminar.' },
-      },
+      properties: { id: { type: 'string', description: 'id del pendiente a eliminar.' } },
       required: ['id'],
     },
   },
@@ -118,10 +94,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         area: { type: 'string', enum: [...AREAS, 'todas'] },
-        estado: {
-          type: 'string',
-          enum: ['pendientes', 'completados', 'vencidos', 'todos'],
-        },
+        estado: { type: 'string', enum: ['pendientes', 'completados', 'vencidos', 'todos'] },
       },
       required: [],
     },
@@ -170,10 +143,6 @@ const TOOLS = [
 
 // --- Helpers ----------------------------------------------------------------
 
-function createId() {
-  return `${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`
-}
-
 function todayStr() {
   const d = new Date()
   const y = d.getFullYear()
@@ -191,101 +160,25 @@ function addDays(iso, days) {
   return `${y}-${m}-${day}`
 }
 
-function loadTodos() {
-  try {
-    const raw = localStorage.getItem(TODOS_KEY)
-    if (raw) return JSON.parse(raw)
-
-    // Migración desde la versión "dashboard" anterior (v2: { areas, negocios })
-    const v2raw = localStorage.getItem(LEGACY_TODOS_KEY_V2)
-    if (v2raw) {
-      const v2 = JSON.parse(v2raw)
-      const flat = []
-      for (const area of AREAS) {
-        for (const t of v2.areas?.[area] || []) {
-          flat.push({
-            id: t.id || createId(),
-            area,
-            text: t.text,
-            priority: t.priority || 'media',
-            dueDate: t.dueDate || null,
-            done: !!t.done,
-          })
-        }
-      }
-      return flat
-    }
-
-    // Migración desde la primera versión (v1, sin prioridad/fecha)
-    const v1raw = localStorage.getItem(LEGACY_TODOS_KEY_V1)
-    if (v1raw) {
-      const v1 = JSON.parse(v1raw)
-      const flat = []
-      for (const area of AREAS) {
-        for (const t of v1[area] || []) {
-          flat.push({
-            id: t.id || createId(),
-            area,
-            text: t.text,
-            priority: 'media',
-            dueDate: null,
-            done: !!t.done,
-          })
-        }
-      }
-      return flat
-    }
-  } catch {
-    // localStorage corrupto: seguimos con lista vacía
+function rowToTodo(row) {
+  return {
+    id: row.id,
+    area: row.area,
+    text: row.text,
+    priority: row.priority,
+    dueDate: row.due_date,
+    done: row.done,
   }
-  return []
 }
 
-function loadNegocios() {
-  try {
-    const raw = localStorage.getItem(NEGOCIOS_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      return {
-        rayban: { ...DEFAULT_NEGOCIOS.rayban, ...parsed.rayban },
-        iphone: { ...DEFAULT_NEGOCIOS.iphone, ...parsed.iphone },
-      }
-    }
-    // Migración desde v2, que guardaba .negocios dentro del mismo objeto
-    const v2raw = localStorage.getItem(LEGACY_TODOS_KEY_V2)
-    if (v2raw) {
-      const v2 = JSON.parse(v2raw)
-      if (v2.negocios) {
-        return {
-          rayban: { ...DEFAULT_NEGOCIOS.rayban, ...v2.negocios.rayban },
-          iphone: { ...DEFAULT_NEGOCIOS.iphone, ...v2.negocios.iphone },
-        }
-      }
-    }
-  } catch {
-    // ignorar
+function rowToMovimiento(row) {
+  return {
+    id: row.id,
+    tipo: row.tipo,
+    monto: Number(row.monto),
+    concepto: row.concepto,
+    fecha: row.fecha,
   }
-  return DEFAULT_NEGOCIOS
-}
-
-function loadFinanzas() {
-  try {
-    const raw = localStorage.getItem(FINANZAS_KEY)
-    if (raw) return JSON.parse(raw)
-  } catch {
-    // ignorar
-  }
-  return { movimientos: [] }
-}
-
-function loadChat() {
-  try {
-    const raw = localStorage.getItem(CHAT_KEY)
-    if (raw) return JSON.parse(raw)
-  } catch {
-    // ignorar
-  }
-  return []
 }
 
 function buildSystemPrompt(state) {
@@ -351,36 +244,55 @@ CÓMO DEBES COMPORTARTE:
 - Sé breve. Nada de relleno ni disclaimers innecesarios.`
 }
 
-function executeTool(name, input, state) {
+// Ejecuta una tool llamada por Claude: lee/escribe directo en Supabase
+// (protegido por las políticas de RLS del usuario autenticado) y devuelve
+// el estado en memoria actualizado para que el resto del loop lo use.
+async function executeTool(name, input, state, userId) {
   const { todos, negocios, finanzas } = state
   const today = todayStr()
 
   switch (name) {
     case 'crear_pendiente': {
-      const nuevo = {
-        id: createId(),
-        area: AREAS.includes(input.area) ? input.area : 'personal',
-        text: input.texto,
-        priority: ['alta', 'media', 'baja'].includes(input.prioridad) ? input.prioridad : 'media',
-        dueDate: input.fecha_limite || null,
-        done: false,
-      }
+      const area = AREAS.includes(input.area) ? input.area : 'personal'
+      const priority = ['alta', 'media', 'baja'].includes(input.prioridad) ? input.prioridad : 'media'
+      const { data, error } = await supabase
+        .from('todos')
+        .insert({
+          user_id: userId,
+          area,
+          text: input.texto,
+          priority,
+          due_date: input.fecha_limite || null,
+          done: false,
+        })
+        .select()
+        .single()
+      if (error || !data) return { state, result: { ok: false, error: error?.message || 'error al guardar' } }
+      const nuevo = rowToTodo(data)
       return { state: { ...state, todos: [...todos, nuevo] }, result: { ok: true, pendiente: nuevo } }
     }
 
     case 'completar_pendiente': {
-      const idx = todos.findIndex((t) => t.id === input.id)
-      if (idx === -1) return { state, result: { ok: false, error: 'id no encontrado' } }
-      const next = [...todos]
-      next[idx] = { ...next[idx], done: true }
-      return { state: { ...state, todos: next }, result: { ok: true, pendiente: next[idx] } }
+      const { data, error } = await supabase
+        .from('todos')
+        .update({ done: true })
+        .eq('id', input.id)
+        .eq('user_id', userId)
+        .select()
+        .single()
+      if (error || !data) return { state, result: { ok: false, error: 'id no encontrado' } }
+      const actualizado = rowToTodo(data)
+      return {
+        state: { ...state, todos: todos.map((t) => (t.id === actualizado.id ? actualizado : t)) },
+        result: { ok: true, pendiente: actualizado },
+      }
     }
 
     case 'eliminar_pendiente': {
-      const existed = todos.some((t) => t.id === input.id)
+      const { error } = await supabase.from('todos').delete().eq('id', input.id).eq('user_id', userId)
       return {
         state: { ...state, todos: todos.filter((t) => t.id !== input.id) },
-        result: { ok: existed },
+        result: { ok: !error },
       }
     }
 
@@ -396,9 +308,7 @@ function executeTool(name, input, state) {
     }
 
     case 'actualizar_negocio': {
-      if (!negocios[input.producto]) {
-        return { state, result: { ok: false, error: 'producto inválido' } }
-      }
+      if (!negocios[input.producto]) return { state, result: { ok: false, error: 'producto inválido' } }
       const actual = negocios[input.producto][input.campo] ?? 0
       let siguiente = actual
       if (input.operacion === 'set') siguiente = input.valor
@@ -406,24 +316,35 @@ function executeTool(name, input, state) {
       else if (input.operacion === 'restar') siguiente = actual - input.valor
       siguiente = Math.max(0, siguiente)
 
-      const nextNegocios = {
-        ...negocios,
-        [input.producto]: { ...negocios[input.producto], [input.campo]: siguiente },
-      }
+      const nextBiz = { ...negocios[input.producto], [input.campo]: siguiente }
+      const { error } = await supabase
+        .from('negocios')
+        .upsert(
+          { user_id: userId, producto: input.producto, stock: nextBiz.stock, por_cobrar: nextBiz.porCobrar },
+          { onConflict: 'user_id,producto' },
+        )
+      if (error) return { state, result: { ok: false, error: error.message } }
+
       return {
-        state: { ...state, negocios: nextNegocios },
+        state: { ...state, negocios: { ...negocios, [input.producto]: nextBiz } },
         result: { ok: true, producto: input.producto, campo: input.campo, valorAnterior: actual, valorNuevo: siguiente },
       }
     }
 
     case 'registrar_movimiento': {
-      const nuevo = {
-        id: createId(),
-        tipo: input.tipo === 'ingreso' ? 'ingreso' : 'gasto',
-        monto: Number(input.monto) || 0,
-        concepto: input.concepto || '',
-        fecha: input.fecha || today,
-      }
+      const { data, error } = await supabase
+        .from('movimientos')
+        .insert({
+          user_id: userId,
+          tipo: input.tipo === 'ingreso' ? 'ingreso' : 'gasto',
+          monto: Number(input.monto) || 0,
+          concepto: input.concepto || '',
+          fecha: input.fecha || today,
+        })
+        .select()
+        .single()
+      if (error || !data) return { state, result: { ok: false, error: error?.message || 'error al guardar' } }
+      const nuevo = rowToMovimiento(data)
       return {
         state: { ...state, finanzas: { ...finanzas, movimientos: [nuevo, ...finanzas.movimientos] } },
         result: { ok: true, movimiento: nuevo },
@@ -433,6 +354,21 @@ function executeTool(name, input, state) {
     default:
       return { state, result: { ok: false, error: `Herramienta desconocida: ${name}` } }
   }
+}
+
+async function callClaude({ system, tools, messages }) {
+  const res = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ system, tools, messages }),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    const err = new Error(data.error || `Error ${res.status}`)
+    err.status = res.status
+    throw err
+  }
+  return data
 }
 
 function toApiMessages(messages) {
@@ -457,10 +393,14 @@ function notificarSiHaceFalta(todos) {
 // --- App ---------------------------------------------------------------
 
 function App() {
-  const [todos, setTodos] = useState(loadTodos)
-  const [negocios, setNegocios] = useState(loadNegocios)
-  const [finanzas, setFinanzas] = useState(loadFinanzas)
-  const [messages, setMessages] = useState(loadChat)
+  const [session, setSession] = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [dataLoaded, setDataLoaded] = useState(false)
+
+  const [todos, setTodos] = useState([])
+  const [negocios, setNegocios] = useState(DEFAULT_NEGOCIOS)
+  const [finanzas, setFinanzas] = useState({ movimientos: [] })
+  const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -476,68 +416,109 @@ function App() {
     stateRef.current = { todos, negocios, finanzas }
   }, [todos, negocios, finanzas])
 
+  // --- Auth ---
   useEffect(() => {
-    try {
-      localStorage.setItem(TODOS_KEY, JSON.stringify(todos))
-    } catch {
-      // localStorage no disponible
+    if (!supabase) {
+      setAuthLoading(false)
+      return
     }
-  }, [todos])
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session)
+      setAuthLoading(false)
+    })
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession)
+      if (!newSession) {
+        // Sesión cerrada: limpiar todo para no filtrar datos entre cuentas
+        setTodos([])
+        setNegocios(DEFAULT_NEGOCIOS)
+        setFinanzas({ movimientos: [] })
+        setMessages([])
+        setDataLoaded(false)
+        kickoffFired.current = false
+      }
+    })
+    return () => listener.subscription.unsubscribe()
+  }, [])
 
+  // --- Carga inicial de datos del usuario autenticado ---
   useEffect(() => {
-    try {
-      localStorage.setItem(NEGOCIOS_KEY, JSON.stringify(negocios))
-    } catch {
-      // localStorage no disponible
+    if (!session || !supabase) return
+    let cancelled = false
+
+    async function loadAll() {
+      const userId = session.user.id
+
+      const [todosRes, negociosRes, movRes, msgRes] = await Promise.all([
+        supabase.from('todos').select('*').eq('user_id', userId).order('created_at'),
+        supabase.from('negocios').select('*').eq('user_id', userId),
+        supabase.from('movimientos').select('*').eq('user_id', userId).order('created_at', { ascending: false }),
+        supabase.from('chat_messages').select('*').eq('user_id', userId).order('created_at'),
+      ])
+
+      if (cancelled) return
+
+      setTodos((todosRes.data || []).map(rowToTodo))
+
+      const negociosMap = { ...DEFAULT_NEGOCIOS }
+      for (const row of negociosRes.data || []) {
+        if (negociosMap[row.producto]) {
+          negociosMap[row.producto] = {
+            ...negociosMap[row.producto],
+            stock: Number(row.stock),
+            porCobrar: Number(row.por_cobrar),
+          }
+        }
+      }
+      const existentes = new Set((negociosRes.data || []).map((r) => r.producto))
+      const faltantes = ['rayban', 'iphone'].filter((p) => !existentes.has(p))
+      if (faltantes.length > 0) {
+        await supabase
+          .from('negocios')
+          .upsert(faltantes.map((p) => ({ user_id: userId, producto: p, stock: 0, por_cobrar: 0 })))
+      }
+      setNegocios(negociosMap)
+
+      setFinanzas({ movimientos: (movRes.data || []).map(rowToMovimiento) })
+
+      setMessages(
+        (msgRes.data || []).map((m) => ({ role: m.role, content: m.content, hidden: m.hidden })),
+      )
+
+      setDataLoaded(true)
     }
-  }, [negocios])
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(FINANZAS_KEY, JSON.stringify(finanzas))
-    } catch {
-      // localStorage no disponible
+    loadAll()
+    return () => {
+      cancelled = true
     }
-  }, [finanzas])
+  }, [session])
 
+  // --- Kickoff proactivo al abrir con datos ya cargados ---
   useEffect(() => {
-    try {
-      localStorage.setItem(CHAT_KEY, JSON.stringify(messages))
-    } catch {
-      // localStorage no disponible
-    }
-  }, [messages])
-
-  useEffect(() => {
-    if (kickoffFired.current) return
+    if (!dataLoaded || kickoffFired.current) return
     kickoffFired.current = true
 
     if (notifEnabled) notificarSiHaceFalta(stateRef.current.todos)
 
     if (messages.length === 0) {
-      runConversation([{ role: 'user', content: KICKOFF_PROMPT, hidden: true }])
+      runConversation([{ role: 'user', content: KICKOFF_PROMPT, hidden: true }], 0)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [dataLoaded])
 
-  async function runConversation(historyToSend) {
-    if (!client) {
-      setError('Falta configurar VITE_ANTHROPIC_API_KEY en el archivo .env')
-      return
-    }
-
+  async function runConversation(historyToSend, persistedCount) {
     setLoading(true)
     setError(null)
     setMessages(historyToSend)
 
     let currentMessages = historyToSend
     let workingState = stateRef.current
+    const userId = session.user.id
 
     try {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-        const response = await client.messages.create({
-          model: MODEL_ID,
-          max_tokens: 4096,
+        const response = await callClaude({
           system: buildSystemPrompt(workingState),
           tools: TOOLS,
           messages: toApiMessages(currentMessages),
@@ -550,13 +531,9 @@ function App() {
         const toolResults = []
         for (const block of response.content) {
           if (block.type !== 'tool_use') continue
-          const { state: nextState, result } = executeTool(block.name, block.input, workingState)
+          const { state: nextState, result } = await executeTool(block.name, block.input, workingState, userId)
           workingState = nextState
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: JSON.stringify(result),
-          })
+          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) })
         }
 
         currentMessages = [...currentMessages, { role: 'user', content: toolResults }]
@@ -566,15 +543,18 @@ function App() {
       setNegocios(workingState.negocios)
       setFinanzas(workingState.finanzas)
       setMessages(currentMessages)
+
+      const nuevos = currentMessages.slice(persistedCount)
+      if (nuevos.length > 0) {
+        await supabase.from('chat_messages').insert(
+          nuevos.map((m) => ({ user_id: userId, role: m.role, content: m.content, hidden: !!m.hidden })),
+        )
+      }
     } catch (err) {
       let msg = 'No pude conectar con Claude. Intenta de nuevo.'
-      if (err instanceof Anthropic.AuthenticationError) {
-        msg = 'La API key no es válida. Revisa VITE_ANTHROPIC_API_KEY en tu .env.'
-      } else if (err instanceof Anthropic.RateLimitError) {
-        msg = 'Se alcanzó el límite de peticiones. Espera un momento e intenta de nuevo.'
-      } else if (err instanceof Anthropic.APIError) {
-        msg = `Error de la API (${err.status}): ${err.message}`
-      }
+      if (err.status === 429) msg = 'Se alcanzó el límite de peticiones. Espera un momento e intenta de nuevo.'
+      else if (err.status >= 500) msg = 'Problema en el servidor. Intenta de nuevo en un momento.'
+      else if (err.message) msg = err.message
       setError(msg)
       setMessages(currentMessages)
     } finally {
@@ -587,7 +567,7 @@ function App() {
     const text = input.trim()
     if (!text || loading) return
     setInput('')
-    runConversation([...messages, { role: 'user', content: text }])
+    runConversation([...messages, { role: 'user', content: text }], messages.length)
   }
 
   async function handleEnableNotifications() {
@@ -603,31 +583,89 @@ function App() {
     if (granted) notificarSiHaceFalta(stateRef.current.todos)
   }
 
-  function toggleTodo(id) {
-    setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: !t.done } : t)))
+  async function handleLogout() {
+    if (!supabase) return
+    await supabase.auth.signOut()
   }
 
-  function deleteTodo(id) {
+  async function toggleTodo(id) {
+    const todo = todos.find((t) => t.id === id)
+    if (!todo) return
+    const nextDone = !todo.done
+    setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: nextDone } : t)))
+    await supabase.from('todos').update({ done: nextDone }).eq('id', id)
+  }
+
+  async function deleteTodo(id) {
     setTodos((prev) => prev.filter((t) => t.id !== id))
+    await supabase.from('todos').delete().eq('id', id)
   }
 
-  function addTodoManual(area, { text, priority, dueDate }) {
-    const nuevo = { id: createId(), area, text, priority, dueDate: dueDate || null, done: false }
-    setTodos((prev) => [...prev, nuevo])
+  async function addTodoManual(area, { text, priority, dueDate }) {
+    const userId = session.user.id
+    const { data, error } = await supabase
+      .from('todos')
+      .insert({ user_id: userId, area, text, priority, due_date: dueDate || null, done: false })
+      .select()
+      .single()
+    if (!error && data) setTodos((prev) => [...prev, rowToTodo(data)])
   }
 
-  function updateNegocio(productKey, field, rawValue) {
+  async function updateNegocio(productKey, field, rawValue) {
     const value = rawValue === '' ? 0 : Math.max(0, Number(rawValue))
-    setNegocios((prev) => ({ ...prev, [productKey]: { ...prev[productKey], [field]: value } }))
+    const next = { ...negocios[productKey], [field]: value }
+    setNegocios((prev) => ({ ...prev, [productKey]: next }))
+    await supabase.from('negocios').upsert(
+      { user_id: session.user.id, producto: productKey, stock: next.stock, por_cobrar: next.porCobrar },
+      { onConflict: 'user_id,producto' },
+    )
   }
 
-  function addMovimiento({ tipo, monto, concepto }) {
-    const nuevo = { id: createId(), tipo, monto: Number(monto) || 0, concepto, fecha: todayStr() }
-    setFinanzas((prev) => ({ ...prev, movimientos: [nuevo, ...prev.movimientos] }))
+  async function addMovimiento({ tipo, monto, concepto }) {
+    const userId = session.user.id
+    const { data, error } = await supabase
+      .from('movimientos')
+      .insert({ user_id: userId, tipo, monto: Number(monto) || 0, concepto, fecha: todayStr() })
+      .select()
+      .single()
+    if (!error && data) {
+      setFinanzas((prev) => ({ movimientos: [rowToMovimiento(data), ...prev.movimientos] }))
+    }
   }
 
-  function deleteMovimiento(id) {
-    setFinanzas((prev) => ({ ...prev, movimientos: prev.movimientos.filter((m) => m.id !== id) }))
+  async function deleteMovimiento(id) {
+    setFinanzas((prev) => ({ movimientos: prev.movimientos.filter((m) => m.id !== id) }))
+    await supabase.from('movimientos').delete().eq('id', id)
+  }
+
+  if (authLoading) {
+    return (
+      <div className="splash">
+        <span className="pulse-dot" aria-hidden="true" />
+      </div>
+    )
+  }
+
+  if (!supabase) {
+    return (
+      <div className="splash">
+        <div className="msg msg-error">
+          Falta configurar VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY en tu .env
+        </div>
+      </div>
+    )
+  }
+
+  if (!session) {
+    return <Login />
+  }
+
+  if (!dataLoaded) {
+    return (
+      <div className="splash">
+        <span className="pulse-dot" aria-hidden="true" />
+      </div>
+    )
   }
 
   const activeArea = AREA_CONFIG.find((a) => a.key === activeTab)
@@ -639,15 +677,26 @@ function App() {
           <span className="pulse-dot" aria-hidden="true" />
           <h1>JARVIS</h1>
         </div>
-        <button
-          type="button"
-          className={`notif-btn ${notifEnabled ? 'on' : ''}`}
-          onClick={handleEnableNotifications}
-          aria-label="Activar recordatorios"
-          title="Activar recordatorios"
-        >
-          {notifEnabled ? '🔔' : '🔕'}
-        </button>
+        <div className="header-actions">
+          <button
+            type="button"
+            className={`notif-btn ${notifEnabled ? 'on' : ''}`}
+            onClick={handleEnableNotifications}
+            aria-label="Activar recordatorios"
+            title="Activar recordatorios"
+          >
+            {notifEnabled ? '🔔' : '🔕'}
+          </button>
+          <button
+            type="button"
+            className="notif-btn"
+            onClick={handleLogout}
+            aria-label="Cerrar sesión"
+            title="Cerrar sesión"
+          >
+            🚪
+          </button>
+        </div>
       </header>
 
       <main className="view-area">

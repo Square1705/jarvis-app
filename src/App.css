@@ -673,12 +673,30 @@
 
 .fin-item {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 9px 12px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
   font-size: 13px;
+}
+
+.fin-item.fin-proyectado {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+}
+
+.fin-item-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fin-item-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
 }
 
 .fin-concepto {
@@ -686,6 +704,10 @@
   min-width: 0;
   overflow-wrap: anywhere;
   color: #e4e4e7;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .fin-monto {
@@ -699,6 +721,52 @@
 
 .fin-item.fin-gasto .fin-monto {
   color: #f87171;
+}
+
+.fin-chip-proyectado {
+  color: #0a0a0a;
+  background: #a1a1aa;
+}
+
+.fin-proyectado-note {
+  font-size: 12px;
+  color: #a1a1aa;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+
+.fin-confirmado-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #a1a1aa;
+  cursor: pointer;
+}
+
+.fin-confirmado-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--area-color);
+  cursor: pointer;
+}
+
+.fin-confirm-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(74, 222, 128, 0.4);
+  background: rgba(74, 222, 128, 0.1);
+  color: #4ade80;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.fin-confirm-btn:hover {
+  background: rgba(74, 222, 128, 0.2);
 }
 
 /* --- Pendientes list (dentro del dashboard) --- */

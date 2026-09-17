@@ -29,6 +29,11 @@ create table if not exists public.movimientos (
   monto numeric not null,
   concepto text not null,
   fecha date not null default current_date,
+  -- true = el dinero ya se movió de verdad; false = es una proyección /
+  -- plan a futuro (ej: "probablemente gaste X mañana") que todavía no cuenta
+  -- como saldo real. Ver supabase/migrations/002_movimientos_confirmado.sql
+  -- para instalaciones existentes.
+  confirmado boolean not null default true,
   created_at timestamptz not null default now()
 );
 

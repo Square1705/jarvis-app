@@ -1,19 +1,28 @@
 import { useState } from 'react'
 
-function FinanzasWidget({ movimientos, onAdd, onDelete }) {
+function FinanzasWidget({ movimientos, onAdd, onDelete, onConfirm }) {
   const [tipo, setTipo] = useState('gasto')
   const [monto, setMonto] = useState('')
   const [concepto, setConcepto] = useState('')
+  const [confirmado, setConfirmado] = useState(true)
 
-  const ingresos = movimientos.filter((m) => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0)
-  const gastos = movimientos.filter((m) => m.tipo === 'gasto').reduce((s, m) => s + m.monto, 0)
+  const confirmados = movimientos.filter((m) => m.confirmado)
+  const proyectados = movimientos.filter((m) => !m.confirmado)
+
+  const ingresos = confirmados.filter((m) => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0)
+  const gastos = confirmados.filter((m) => m.tipo === 'gasto').reduce((s, m) => s + m.monto, 0)
   const saldo = ingresos - gastos
+
+  const netoProyectado = proyectados.reduce(
+    (s, m) => s + (m.tipo === 'ingreso' ? m.monto : -m.monto),
+    0,
+  )
 
   function handleSubmit(e) {
     e.preventDefault()
     const value = Number(monto)
     if (!value || value <= 0 || !concepto.trim()) return
-    onAdd({ tipo, monto: value, concepto: concepto.trim() })
+    onAdd({ tipo, monto: value, concepto: concepto.trim(), confirmado })
     setMonto('')
     setConcepto('')
   }
@@ -36,6 +45,15 @@ function FinanzasWidget({ movimientos, onAdd, onDelete }) {
           <span className="stat-label">Saldo</span>
         </div>
       </div>
+
+      {proyectados.length > 0 && (
+        <div className="fin-proyectado-note">
+          📋 Si se cumplen tus {proyectados.length} proyección(es): saldo quedaría en{' '}
+          <strong className={saldo + netoProyectado >= 0 ? 'fin-in' : 'fin-out'}>
+            S/ {(saldo + netoProyectado).toFixed(0)}
+          </strong>
+        </div>
+      )}
 
       <form className="fin-add-form" onSubmit={handleSubmit}>
         <select value={tipo} onChange={(e) => setTipo(e.target.value)} aria-label="Tipo de movimiento">
@@ -61,22 +79,47 @@ function FinanzasWidget({ movimientos, onAdd, onDelete }) {
         </button>
       </form>
 
+      <label className="fin-confirmado-toggle">
+        <input
+          type="checkbox"
+          checked={confirmado}
+          onChange={(e) => setConfirmado(e.target.checked)}
+        />
+        <span>{confirmado ? 'Ya sucedió' : 'Es una proyección a futuro'}</span>
+      </label>
+
       <ul className="fin-list">
         {movimientos.length === 0 && <li className="empty">Sin movimientos</li>}
-        {movimientos.slice(0, 20).map((m) => (
-          <li key={m.id} className={`fin-item fin-${m.tipo}`}>
-            <span className="fin-concepto">{m.concepto}</span>
-            <span className="fin-monto">
-              {m.tipo === 'gasto' ? '-' : '+'}S/ {m.monto.toFixed(2)}
-            </span>
-            <button
-              type="button"
-              className="delete-btn"
-              aria-label="Eliminar movimiento"
-              onClick={() => onDelete(m.id)}
-            >
-              ×
-            </button>
+        {[...proyectados, ...confirmados].map((m) => (
+          <li key={m.id} className={`fin-item fin-${m.tipo} ${!m.confirmado ? 'fin-proyectado' : ''}`}>
+            <div className="fin-item-main">
+              <span className="fin-concepto">
+                {!m.confirmado && <span className="chip fin-chip-proyectado">Proyectado</span>}
+                {m.concepto}
+              </span>
+              <span className="fin-monto">
+                {m.tipo === 'gasto' ? '-' : '+'}S/ {m.monto.toFixed(2)}
+              </span>
+            </div>
+            <div className="fin-item-actions">
+              {!m.confirmado && (
+                <button
+                  type="button"
+                  className="fin-confirm-btn"
+                  onClick={() => onConfirm(m.id)}
+                >
+                  ✓ Confirmar
+                </button>
+              )}
+              <button
+                type="button"
+                className="delete-btn"
+                aria-label="Eliminar movimiento"
+                onClick={() => onDelete(m.id)}
+              >
+                ×
+              </button>
+            </div>
           </li>
         ))}
       </ul>

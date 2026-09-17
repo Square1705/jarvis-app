@@ -124,7 +124,9 @@ const TOOLS = [
   },
   {
     name: 'registrar_movimiento',
-    description: 'Registra un ingreso o gasto de dinero en las finanzas personales de Gonzalo.',
+    description:
+      'Registra un ingreso o gasto de dinero en las finanzas personales de Gonzalo — ' +
+      'tanto movimientos que ya sucedieron como proyecciones/planes a futuro.',
     input_schema: {
       type: 'object',
       properties: {
@@ -135,8 +137,27 @@ const TOOLS = [
           type: 'string',
           description: 'Fecha en formato YYYY-MM-DD. Si no se especifica, se usa la de hoy.',
         },
+        confirmado: {
+          type: 'boolean',
+          description:
+            'true si el dinero YA se movió de verdad (ya gastó, ya pagó, ya le depositaron). ' +
+            'false si es una proyección o plan a futuro que todavía no ha sucedido (ej: ' +
+            '"probablemente gaste 1800 mañana"). Ante la duda, usa false.',
+        },
       },
-      required: ['tipo', 'monto', 'concepto'],
+      required: ['tipo', 'monto', 'concepto', 'confirmado'],
+    },
+  },
+  {
+    name: 'confirmar_movimiento',
+    description:
+      'Marca un movimiento que estaba proyectado (confirmado=false) como confirmado, ' +
+      'cuando Gonzalo indique que ese gasto/ingreso ya sucedió realmente. No crea un ' +
+      'movimiento nuevo, actualiza el existente.',
+    input_schema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'id del movimiento a confirmar.' } },
+      required: ['id'],
     },
   },
 ]
@@ -178,6 +199,7 @@ function rowToMovimiento(row) {
     monto: Number(row.monto),
     concepto: row.concepto,
     fecha: row.fecha,
+    confirmado: row.confirmado,
   }
 }
 
@@ -195,18 +217,31 @@ function buildSystemPrompt(state) {
           )
           .join('\n')
 
-  const ingresos = finanzas.movimientos
-    .filter((m) => m.tipo === 'ingreso')
-    .reduce((s, m) => s + m.monto, 0)
-  const gastos = finanzas.movimientos
-    .filter((m) => m.tipo === 'gasto')
-    .reduce((s, m) => s + m.monto, 0)
-  const movimientosTexto =
-    finanzas.movimientos.length === 0
-      ? '(sin movimientos registrados)'
-      : finanzas.movimientos
+  const confirmados = finanzas.movimientos.filter((m) => m.confirmado)
+  const proyectados = finanzas.movimientos.filter((m) => !m.confirmado)
+
+  const ingresosConf = confirmados.filter((m) => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0)
+  const gastosConf = confirmados.filter((m) => m.tipo === 'gasto').reduce((s, m) => s + m.monto, 0)
+  const saldoConf = ingresosConf - gastosConf
+
+  const netoProyectado = proyectados.reduce(
+    (s, m) => s + (m.tipo === 'ingreso' ? m.monto : -m.monto),
+    0,
+  )
+
+  const confirmadosTexto =
+    confirmados.length === 0
+      ? '(sin movimientos confirmados)'
+      : confirmados
           .slice(0, 10)
           .map((m) => `- ${m.fecha} | ${m.tipo} | S/ ${m.monto} | ${m.concepto}`)
+          .join('\n')
+
+  const proyectadosTexto =
+    proyectados.length === 0
+      ? '(sin proyecciones pendientes)'
+      : proyectados
+          .map((m) => `- id:${m.id} | ${m.fecha} | ${m.tipo} | S/ ${m.monto} | ${m.concepto}`)
           .join('\n')
 
   return `Eres JARVIS, el asistente de vida personal de Gonzalo. Hablas en español, tono cercano, directo y eficiente — como un asistente de confianza, no como un chatbot corporativo. Respuestas cortas salvo que se pida detalle.
@@ -228,17 +263,20 @@ NEGOCIOS (stock y cobros pendientes):
 - iPhones: stock=${negocios.iphone.stock}, por cobrar=S/ ${negocios.iphone.porCobrar}
 
 FINANZAS:
-- Ingresos totales registrados: S/ ${ingresos.toFixed(2)}
-- Gastos totales registrados: S/ ${gastos.toFixed(2)}
-- Saldo: S/ ${(ingresos - gastos).toFixed(2)}
-- Movimientos recientes:
-${movimientosTexto}
+- Saldo actual (solo movimientos confirmados, dinero que ya se movió de verdad): S/ ${saldoConf.toFixed(2)}
+- Movimientos confirmados recientes:
+${confirmadosTexto}
+- Proyecciones a futuro AÚN NO confirmadas (planes, estimados, "probablemente gaste X" — todavía no han sucedido, usa su "id" con confirmar_movimiento cuando Gonzalo diga que ya pasaron de verdad):
+${proyectadosTexto}
+- Si se cumplieran todas las proyecciones de arriba, el saldo quedaría en: S/ ${(saldoConf + netoProyectado).toFixed(2)}
 
 CÓMO DEBES COMPORTARTE:
 - Cuando Gonzalo mencione algo que tiene que hacer/resolver, créalo como pendiente con crear_pendiente (elige el área correcta: trabajo, negocios, personal o finanzas).
 - Si no da fecha límite, sugiere tú una fecha razonable según la urgencia y dilo explícitamente en tu respuesta (ej: "le puse fecha para el viernes porque...").
 - Cuando mencione una venta, cobro o cambio de stock de Ray-Ban/iPhone, usa actualizar_negocio.
-- Cuando mencione un ingreso o gasto de dinero, regístralo con registrar_movimiento.
+- Cuando mencione dinero que YA se movió (ya gastó, ya pagó, ya le depositaron, ya cobró), usa registrar_movimiento con confirmado=true.
+- Cuando mencione algo que PROBABLEMENTE o PLANEA gastar/recibir a futuro (ej: "probablemente gaste 1800 mañana", "voy a cobrar 500 la próxima semana"), usa registrar_movimiento con confirmado=false — es una proyección, NO debe contarse como saldo ya gastado. Ante la duda, usa false.
+- Cuando Gonzalo confirme que una proyección ya sucedió de verdad ("ya gasté eso que dije", "sí se dio el pago"), usa confirmar_movimiento con su id en vez de crear un movimiento nuevo.
 - No listes datos en bruto sin razón: cuando hables de pendientes o negocios, sugiere cómo abordarlos o en qué orden.
 - Si detectas pendientes vencidos, sin fecha, o que vencen en los próximos 2 días, menciónalos proactivamente aunque no te lo pidan.
 - Sé breve. Nada de relleno ni disclaimers innecesarios.`
@@ -340,6 +378,7 @@ async function executeTool(name, input, state, userId) {
           monto: Number(input.monto) || 0,
           concepto: input.concepto || '',
           fecha: input.fecha || today,
+          confirmado: input.confirmado !== false,
         })
         .select()
         .single()
@@ -348,6 +387,28 @@ async function executeTool(name, input, state, userId) {
       return {
         state: { ...state, finanzas: { ...finanzas, movimientos: [nuevo, ...finanzas.movimientos] } },
         result: { ok: true, movimiento: nuevo },
+      }
+    }
+
+    case 'confirmar_movimiento': {
+      const { data, error } = await supabase
+        .from('movimientos')
+        .update({ confirmado: true })
+        .eq('id', input.id)
+        .eq('user_id', userId)
+        .select()
+        .single()
+      if (error || !data) return { state, result: { ok: false, error: 'id no encontrado' } }
+      const actualizado = rowToMovimiento(data)
+      return {
+        state: {
+          ...state,
+          finanzas: {
+            ...finanzas,
+            movimientos: finanzas.movimientos.map((m) => (m.id === actualizado.id ? actualizado : m)),
+          },
+        },
+        result: { ok: true, movimiento: actualizado },
       }
     }
 
@@ -621,11 +682,18 @@ function App() {
     )
   }
 
-  async function addMovimiento({ tipo, monto, concepto }) {
+  async function addMovimiento({ tipo, monto, concepto, confirmado }) {
     const userId = session.user.id
     const { data, error } = await supabase
       .from('movimientos')
-      .insert({ user_id: userId, tipo, monto: Number(monto) || 0, concepto, fecha: todayStr() })
+      .insert({
+        user_id: userId,
+        tipo,
+        monto: Number(monto) || 0,
+        concepto,
+        fecha: todayStr(),
+        confirmado: confirmado !== false,
+      })
       .select()
       .single()
     if (!error && data) {
@@ -636,6 +704,13 @@ function App() {
   async function deleteMovimiento(id) {
     setFinanzas((prev) => ({ movimientos: prev.movimientos.filter((m) => m.id !== id) }))
     await supabase.from('movimientos').delete().eq('id', id)
+  }
+
+  async function confirmMovimiento(id) {
+    setFinanzas((prev) => ({
+      movimientos: prev.movimientos.map((m) => (m.id === id ? { ...m, confirmado: true } : m)),
+    }))
+    await supabase.from('movimientos').update({ confirmado: true }).eq('id', id)
   }
 
   if (authLoading) {
@@ -726,6 +801,7 @@ function App() {
                   movimientos={finanzas.movimientos}
                   onAdd={addMovimiento}
                   onDelete={deleteMovimiento}
+                  onConfirm={confirmMovimiento}
                 />
               ) : null
             }

@@ -1,16 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { getSupabase } from './supabase.js'
-import { CATEGORIA_KEYS } from './constants.js'
+import { getSupabaseAdmin } from './supabaseAdmin.js'
+import { CATEGORIA_KEYS } from '../src/constants.js'
 
-// --- Config ---------------------------------------------------------------
 // Misma lógica que src/App.jsx del frontend (tools, prompt, reglas de
-// negocio). Se mantiene duplicada a propósito: el frontend corre con la
-// key anon del usuario + RLS, este bot corre con la service_role key en un
-// servidor de confianza. Si cambias el comportamiento de JARVIS en un
-// lado, revisa si también aplica acá.
+// negocio) y que tenía telegram-bot/lib/brain.js. Se mantiene duplicada a
+// propósito: el frontend corre con la key anon del usuario + RLS, esto
+// corre server-side con la service_role key. Si cambias el comportamiento
+// de JARVIS en un lado, revisa si también aplica acá.
 
-// Inicialización perezosa: ver el comentario en supabase.js sobre por qué
-// no se construye al importar el módulo.
 let claudeClient = null
 function getClaude() {
   if (!claudeClient) claudeClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -61,15 +58,6 @@ const TOOLS = [
     },
   },
   {
-    name: 'eliminar_pendiente',
-    description: 'Elimina un pendiente existente, dado su id.',
-    input_schema: {
-      type: 'object',
-      properties: { id: { type: 'string', description: 'id del pendiente a eliminar.' } },
-      required: ['id'],
-    },
-  },
-  {
     name: 'editar_pendiente',
     description:
       'Edita el texto, la prioridad y/o la fecha límite de un pendiente ya existente. ' +
@@ -85,6 +73,15 @@ const TOOLS = [
           description: 'Nueva fecha límite en formato YYYY-MM-DD, solo si cambia. Manda cadena vacía para quitarla.',
         },
       },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'eliminar_pendiente',
+    description: 'Elimina un pendiente existente, dado su id.',
+    input_schema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'id del pendiente a eliminar.' } },
       required: ['id'],
     },
   },
@@ -210,7 +207,7 @@ function rowToMovimiento(row) {
 }
 
 function logActivity(userId, tipo, detalle) {
-  getSupabase()
+  getSupabaseAdmin()
     .from('activity_log')
     .insert({ user_id: userId, tipo, detalle: detalle || {} })
     .then(() => {})
@@ -222,7 +219,7 @@ const DEFAULT_NEGOCIOS = {
 }
 
 export async function loadState(userId) {
-  const supabase = getSupabase()
+  const supabase = getSupabaseAdmin()
   const [todosRes, negociosRes, movRes] = await Promise.all([
     supabase.from('todos').select('*').eq('user_id', userId).order('created_at'),
     supabase.from('negocios').select('*').eq('user_id', userId),
@@ -249,7 +246,7 @@ export async function loadState(userId) {
 }
 
 export async function loadProfile(userId) {
-  const { data } = await getSupabase().from('jarvis_profile').select('resumen').eq('user_id', userId).maybeSingle()
+  const { data } = await getSupabaseAdmin().from('jarvis_profile').select('resumen').eq('user_id', userId).maybeSingle()
   return data?.resumen || null
 }
 
@@ -307,7 +304,7 @@ CONTEXTO DE GONZALO:
 ${profile ? `\nPERFIL ACUMULADO (patrones notados a lo largo del tiempo, úsalo para sonar como que lo conoces de verdad):\n${profile}\n` : ''}
 FECHA DE HOY: ${today}
 
-PENDIENTES ACTUALES (usa el "id" exacto para completar_pendiente / eliminar_pendiente):
+PENDIENTES ACTUALES (usa el "id" exacto para completar_pendiente / eliminar_pendiente / editar_pendiente):
 ${pendientesTexto}
 
 PENDIENTES SIN FECHA CREADOS HACE MÁS DE 3 DÍAS (pregúntale proactivamente qué fecha ponerles):
@@ -316,7 +313,7 @@ ${staleTexto}
 NEGOCIOS (stock, cobros pendientes y proyección de ingreso si vendiera todo el stock actual):
 - Ray-Ban Cámara: stock=${negocios.rayban.stock}, por cobrar=S/ ${negocios.rayban.porCobrar}, precio promedio=S/ ${negocios.rayban.precioPromedio}, proyección=S/ ${(negocios.rayban.stock * negocios.rayban.precioPromedio).toFixed(2)}
 - iPhones: stock=${negocios.iphone.stock}, por cobrar=S/ ${negocios.iphone.porCobrar}, precio promedio=S/ ${negocios.iphone.precioPromedio}, proyección=S/ ${(negocios.iphone.stock * negocios.iphone.precioPromedio).toFixed(2)}
-${mood ? `\nESTADO DE ÁNIMO HOY (1-5): ${mood}/5 — ajusta tu tono según esto.\n` : ''}
+
 FINANZAS:
 - Saldo actual (solo movimientos confirmados): S/ ${saldoConf.toFixed(2)}
 - Movimientos confirmados recientes:
@@ -340,7 +337,7 @@ CÓMO DEBES COMPORTARTE:
 }
 
 async function executeTool(name, input, state, userId) {
-  const supabase = getSupabase()
+  const supabase = getSupabaseAdmin()
   const { todos, negocios, finanzas } = state
   const today = todayStr()
 
@@ -376,11 +373,6 @@ async function executeTool(name, input, state, userId) {
       }
     }
 
-    case 'eliminar_pendiente': {
-      const { error } = await supabase.from('todos').delete().eq('id', input.id).eq('user_id', userId)
-      return { state: { ...state, todos: todos.filter((t) => t.id !== input.id) }, result: { ok: !error } }
-    }
-
     case 'editar_pendiente': {
       const cambios = {}
       if (typeof input.texto === 'string' && input.texto.trim()) cambios.text = input.texto.trim()
@@ -402,6 +394,11 @@ async function executeTool(name, input, state, userId) {
         state: { ...state, todos: todos.map((t) => (t.id === actualizado.id ? actualizado : t)) },
         result: { ok: true, pendiente: actualizado },
       }
+    }
+
+    case 'eliminar_pendiente': {
+      const { error } = await supabase.from('todos').delete().eq('id', input.id).eq('user_id', userId)
+      return { state: { ...state, todos: todos.filter((t) => t.id !== input.id) }, result: { ok: !error } }
     }
 
     case 'listar_pendientes': {
@@ -503,12 +500,11 @@ function toApiMessages(messages) {
   return messages.map(({ role, content }) => ({ role, content }))
 }
 
-// Punto de entrada del bot: recibe el texto que Gonzalo mandó por Telegram,
-// reutiliza el MISMO historial de chat_messages que usa la web (así la
-// conversación se siente continua sin importar por dónde le hable), corre
-// el loop de tools, persiste, y devuelve el texto para responderle.
+// Punto de entrada: recibe el texto que Gonzalo mandó por Telegram,
+// reutiliza el MISMO historial de chat_messages que usa la web, corre el
+// loop de tools, persiste, y devuelve el texto para responderle.
 export async function handleIncomingMessage(text) {
-  const supabase = getSupabase()
+  const supabase = getSupabaseAdmin()
   const userId = process.env.JARVIS_USER_ID
 
   const { data: msgRows } = await supabase

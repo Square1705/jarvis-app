@@ -1,5 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { getSupabase } from './supabase.js'
+// Reutiliza la misma lista de categorías que el frontend (archivo plano,
+// sin JSX) para que nunca se desincronicen entre web y bot.
+import { CATEGORIA_KEYS } from '../../src/constants.js'
 
 // --- Config ---------------------------------------------------------------
 // Misma lógica que src/App.jsx del frontend (tools, prompt, reglas de
@@ -69,6 +72,25 @@ const TOOLS = [
     },
   },
   {
+    name: 'editar_pendiente',
+    description:
+      'Edita el texto, la prioridad y/o la fecha límite de un pendiente ya existente. ' +
+      'Úsala cuando Gonzalo quiera cambiar algo de un pendiente en vez de crear uno nuevo.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'id del pendiente a editar.' },
+        texto: { type: 'string', description: 'Nuevo texto, solo si cambia.' },
+        prioridad: { type: 'string', enum: ['alta', 'media', 'baja'], description: 'Nueva prioridad, solo si cambia.' },
+        fecha_limite: {
+          type: 'string',
+          description: 'Nueva fecha límite en formato YYYY-MM-DD, solo si cambia. Manda cadena vacía para quitarla.',
+        },
+      },
+      required: ['id'],
+    },
+  },
+  {
     name: 'listar_pendientes',
     description:
       'Devuelve la lista actual de pendientes, opcionalmente filtrada por área o estado. ' +
@@ -117,6 +139,11 @@ const TOOLS = [
         tipo: { type: 'string', enum: ['ingreso', 'gasto'] },
         monto: { type: 'number', description: 'Monto en soles (S/), siempre positivo.' },
         concepto: { type: 'string', description: 'Breve descripción del movimiento.' },
+        categoria: {
+          type: 'string',
+          enum: CATEGORIA_KEYS,
+          description: 'Categoría del movimiento. Si no es obvia, usa "otros".',
+        },
         fecha: { type: 'string', description: 'Fecha en formato YYYY-MM-DD. Si no se especifica, se usa la de hoy.' },
         confirmado: {
           type: 'boolean',
@@ -178,6 +205,7 @@ function rowToMovimiento(row) {
     tipo: row.tipo,
     monto: Number(row.monto),
     concepto: row.concepto,
+    categoria: row.categoria || 'otros',
     fecha: row.fecha,
     confirmado: row.confirmado,
   }
@@ -222,7 +250,12 @@ export async function loadState(userId) {
   return { todos, negocios, finanzas }
 }
 
-function buildSystemPrompt(state, mood) {
+export async function loadProfile(userId) {
+  const { data } = await getSupabase().from('jarvis_profile').select('resumen').eq('user_id', userId).maybeSingle()
+  return data?.resumen || null
+}
+
+function buildSystemPrompt(state, mood, profile) {
   const { todos, negocios, finanzas } = state
   const today = todayStr()
   const staleLimit = addDays(today, -3)
@@ -255,7 +288,10 @@ function buildSystemPrompt(state, mood) {
   const confirmadosTexto =
     confirmados.length === 0
       ? '(sin movimientos confirmados)'
-      : confirmados.slice(0, 10).map((m) => `- ${m.fecha} | ${m.tipo} | S/ ${m.monto} | ${m.concepto}`).join('\n')
+      : confirmados
+          .slice(0, 10)
+          .map((m) => `- ${m.fecha} | ${m.tipo} | S/ ${m.monto} | ${m.categoria} | ${m.concepto}`)
+          .join('\n')
 
   const proyectadosTexto =
     proyectados.length === 0
@@ -270,7 +306,7 @@ CONTEXTO DE GONZALO:
 - Se está mudando a un departamento propio en Breña.
 - Tiene dos negocios secundarios: venta de lentes Ray-Ban con cámara, y venta de iPhones.
 - Le gusta el contenido de TikTok y los corridos tumbados.
-
+${profile ? `\nPERFIL ACUMULADO (patrones notados a lo largo del tiempo, úsalo para sonar como que lo conoces de verdad):\n${profile}\n` : ''}
 FECHA DE HOY: ${today}
 
 PENDIENTES ACTUALES (usa el "id" exacto para completar_pendiente / eliminar_pendiente):
@@ -296,7 +332,8 @@ CÓMO DEBES COMPORTARTE:
 - Si no da fecha límite, sugiere tú una fecha razonable y dilo explícitamente en tu respuesta.
 - Cuando mencione una venta, cobro, cambio de stock, o precio de Ray-Ban/iPhone, usa actualizar_negocio.
 - Si hay pendientes sin fecha creados hace más de 3 días, pregúntale proactivamente qué fecha ponerles.
-- Cuando mencione dinero que YA se movió, usa registrar_movimiento con confirmado=true.
+- Si Gonzalo quiere cambiar el texto, prioridad o fecha de un pendiente existente, usa editar_pendiente.
+- Cuando mencione dinero que YA se movió, usa registrar_movimiento con confirmado=true y asígnale una categoria.
 - Cuando mencione algo que PROBABLEMENTE o PLANEA gastar/recibir a futuro, usa registrar_movimiento con confirmado=false. Ante la duda, usa false.
 - Cuando confirme que una proyección ya sucedió, usa confirmar_movimiento con su id.
 - No listes datos en bruto sin razón: sugiere cómo abordarlos o en qué orden.
@@ -346,6 +383,29 @@ async function executeTool(name, input, state, userId) {
       return { state: { ...state, todos: todos.filter((t) => t.id !== input.id) }, result: { ok: !error } }
     }
 
+    case 'editar_pendiente': {
+      const cambios = {}
+      if (typeof input.texto === 'string' && input.texto.trim()) cambios.text = input.texto.trim()
+      if (['alta', 'media', 'baja'].includes(input.prioridad)) cambios.priority = input.prioridad
+      if (typeof input.fecha_limite === 'string') cambios.due_date = input.fecha_limite || null
+      if (Object.keys(cambios).length === 0) return { state, result: { ok: false, error: 'nada que editar' } }
+
+      const { data, error } = await supabase
+        .from('todos')
+        .update(cambios)
+        .eq('id', input.id)
+        .eq('user_id', userId)
+        .select()
+        .single()
+      if (error || !data) return { state, result: { ok: false, error: 'id no encontrado' } }
+      const actualizado = rowToTodo(data)
+      logActivity(userId, 'pendiente_editado', { id: actualizado.id, cambios })
+      return {
+        state: { ...state, todos: todos.map((t) => (t.id === actualizado.id ? actualizado : t)) },
+        result: { ok: true, pendiente: actualizado },
+      }
+    }
+
     case 'listar_pendientes': {
       let filtered = todos
       if (input.area && input.area !== 'todas') filtered = filtered.filter((t) => t.area === input.area)
@@ -388,6 +448,7 @@ async function executeTool(name, input, state, userId) {
     }
 
     case 'registrar_movimiento': {
+      const categoria = CATEGORIA_KEYS.includes(input.categoria) ? input.categoria : 'otros'
       const { data, error } = await supabase
         .from('movimientos')
         .insert({
@@ -395,6 +456,7 @@ async function executeTool(name, input, state, userId) {
           tipo: input.tipo === 'ingreso' ? 'ingreso' : 'gasto',
           monto: Number(input.monto) || 0,
           concepto: input.concepto || '',
+          categoria,
           fecha: input.fecha || today,
           confirmado: input.confirmado !== false,
         })
@@ -402,7 +464,7 @@ async function executeTool(name, input, state, userId) {
         .single()
       if (error || !data) return { state, result: { ok: false, error: error?.message || 'error al guardar' } }
       const nuevo = rowToMovimiento(data)
-      logActivity(userId, 'movimiento_registrado', { id: nuevo.id, tipo: nuevo.tipo, monto: nuevo.monto, confirmado: nuevo.confirmado })
+      logActivity(userId, 'movimiento_registrado', { id: nuevo.id, tipo: nuevo.tipo, monto: nuevo.monto, categoria: nuevo.categoria, confirmado: nuevo.confirmado })
       return {
         state: { ...state, finanzas: { ...finanzas, movimientos: [nuevo, ...finanzas.movimientos] } },
         result: { ok: true, movimiento: nuevo },
@@ -462,12 +524,13 @@ export async function handleIncomingMessage(text) {
 
   let currentMessages = [...history, { role: 'user', content: text }]
   let workingState = await loadState(userId)
+  const profile = await loadProfile(userId)
 
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     const response = await getClaude().messages.create({
       model: MODEL_ID,
       max_tokens: 4096,
-      system: buildSystemPrompt(workingState, null),
+      system: buildSystemPrompt(workingState, null, profile),
       tools: TOOLS,
       messages: toApiMessages(currentMessages),
     })

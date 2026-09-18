@@ -26,10 +26,56 @@ function sortTodos(todos) {
   })
 }
 
-function DashboardView({ area, todos, onToggle, onDelete, onAdd, extra }) {
+function EditForm({ todo, onSave, onCancel }) {
+  const [text, setText] = useState(todo.text)
+  const [priority, setPriority] = useState(todo.priority)
+  const [dueDate, setDueDate] = useState(todo.dueDate || '')
+
+  function handleSubmit(e) {
+    e.preventDefault()
+    if (!text.trim()) return
+    onSave({ text, priority, dueDate: dueDate || null })
+  }
+
+  return (
+    <form className="edit-form" onSubmit={handleSubmit}>
+      <input
+        type="text"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        aria-label="Editar texto"
+        autoFocus
+      />
+      <div className="edit-form-row">
+        <select value={priority} onChange={(e) => setPriority(e.target.value)} aria-label="Editar prioridad">
+          <option value="alta">🔥 Alta</option>
+          <option value="media">Media</option>
+          <option value="baja">Baja</option>
+        </select>
+        <input
+          type="date"
+          value={dueDate}
+          onChange={(e) => setDueDate(e.target.value)}
+          aria-label="Editar fecha límite"
+        />
+      </div>
+      <div className="edit-form-actions">
+        <button type="button" className="edit-cancel-btn" onClick={onCancel}>
+          Cancelar
+        </button>
+        <button type="submit" className="edit-save-btn">
+          Guardar
+        </button>
+      </div>
+    </form>
+  )
+}
+
+function DashboardView({ area, todos, onToggle, onDelete, onAdd, onEdit, extra }) {
   const [draft, setDraft] = useState('')
   const [priority, setPriority] = useState('media')
   const [dueDate, setDueDate] = useState('')
+  const [editingId, setEditingId] = useState(null)
 
   const today = todayStr()
   const sorted = sortTodos(todos)
@@ -44,6 +90,11 @@ function DashboardView({ area, todos, onToggle, onDelete, onAdd, extra }) {
     onAdd({ text, priority, dueDate: dueDate || null })
     setDraft('')
     setDueDate('')
+  }
+
+  function handleSaveEdit(id, payload) {
+    onEdit(id, payload)
+    setEditingId(null)
   }
 
   return (
@@ -74,6 +125,15 @@ function DashboardView({ area, todos, onToggle, onDelete, onAdd, extra }) {
         {sorted.length === 0 && <li className="empty">Sin pendientes</li>}
         {sorted.map((todo) => {
           const status = dueStatus(todo.dueDate, todo.done)
+
+          if (editingId === todo.id) {
+            return (
+              <li key={todo.id} className="editing">
+                <EditForm todo={todo} onSave={(payload) => handleSaveEdit(todo.id, payload)} onCancel={() => setEditingId(null)} />
+              </li>
+            )
+          }
+
           return (
             <li key={todo.id} className={todo.done ? 'done' : ''}>
               <div className="todo-main">
@@ -85,6 +145,14 @@ function DashboardView({ area, todos, onToggle, onDelete, onAdd, extra }) {
                   />
                   <span>{todo.text}</span>
                 </label>
+                <button
+                  type="button"
+                  className="edit-btn"
+                  aria-label={`Editar "${todo.text}"`}
+                  onClick={() => setEditingId(todo.id)}
+                >
+                  ✎
+                </button>
                 <button
                   type="button"
                   className="delete-btn"

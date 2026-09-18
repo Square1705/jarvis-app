@@ -36,6 +36,7 @@ create table if not exists public.movimientos (
   tipo text not null check (tipo in ('ingreso','gasto')),
   monto numeric not null,
   concepto text not null,
+  categoria text not null default 'otros',
   fecha date not null default current_date,
   -- true = el dinero ya se movió de verdad; false = es una proyección /
   -- plan a futuro (ej: "probablemente gaste X mañana") que todavía no cuenta
@@ -84,6 +85,15 @@ create table if not exists public.insights (
   created_at timestamptz not null default now()
 );
 
+-- Perfil acumulado (memoria narrativa): una fila por usuario, se actualiza
+-- (no se acumula como historial) cada vez que se regeneran los Insights.
+-- Se inyecta en cada conversación como memoria de largo plazo.
+create table if not exists public.jarvis_profile (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  resumen text not null default '',
+  updated_at timestamptz not null default now()
+);
+
 -- Placeholder para integración futura con Google Calendar.
 create table if not exists public.calendar_events (
   id uuid primary key default gen_random_uuid(),
@@ -117,6 +127,7 @@ create policy "negocios_update_own" on public.negocios for update using (auth.ui
 
 create policy "movimientos_select_own" on public.movimientos for select using (auth.uid() = user_id);
 create policy "movimientos_insert_own" on public.movimientos for insert with check (auth.uid() = user_id);
+create policy "movimientos_update_own" on public.movimientos for update using (auth.uid() = user_id);
 create policy "movimientos_delete_own" on public.movimientos for delete using (auth.uid() = user_id);
 
 create policy "chat_select_own" on public.chat_messages for select using (auth.uid() = user_id);
@@ -136,3 +147,8 @@ create policy "calendar_select_own" on public.calendar_events for select using (
 create policy "calendar_insert_own" on public.calendar_events for insert with check (auth.uid() = user_id);
 create policy "calendar_update_own" on public.calendar_events for update using (auth.uid() = user_id);
 create policy "calendar_delete_own" on public.calendar_events for delete using (auth.uid() = user_id);
+
+alter table public.jarvis_profile enable row level security;
+create policy "profile_select_own" on public.jarvis_profile for select using (auth.uid() = user_id);
+create policy "profile_upsert_own" on public.jarvis_profile for insert with check (auth.uid() = user_id);
+create policy "profile_update_own" on public.jarvis_profile for update using (auth.uid() = user_id);

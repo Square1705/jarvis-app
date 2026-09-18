@@ -10,6 +10,8 @@ import DailyBriefing from './components/DailyBriefing'
 import CheckinPrompt from './components/CheckinPrompt'
 import InsightsPanel from './components/InsightsPanel'
 import CalendarPlaceholder from './components/CalendarPlaceholder'
+import CategoryBreakdown from './components/CategoryBreakdown'
+import { CATEGORIA_KEYS } from './constants'
 import './App.css'
 
 // --- Config ---------------------------------------------------------------
@@ -82,6 +84,26 @@ const TOOLS = [
     },
   },
   {
+    name: 'editar_pendiente',
+    description:
+      'Edita el texto, la prioridad y/o la fecha límite de un pendiente ya existente. ' +
+      'Úsala cuando Gonzalo quiera cambiar algo de un pendiente en vez de crear uno nuevo ' +
+      '(ej: "cambia la fecha del pendiente de la luz a el viernes", "ese pendiente es de alta prioridad").',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'id del pendiente a editar.' },
+        texto: { type: 'string', description: 'Nuevo texto, solo si cambia.' },
+        prioridad: { type: 'string', enum: ['alta', 'media', 'baja'], description: 'Nueva prioridad, solo si cambia.' },
+        fecha_limite: {
+          type: 'string',
+          description: 'Nueva fecha límite en formato YYYY-MM-DD, solo si cambia. Manda cadena vacía para quitarla.',
+        },
+      },
+      required: ['id'],
+    },
+  },
+  {
     name: 'eliminar_pendiente',
     description: 'Elimina un pendiente existente, dado su id.',
     input_schema: {
@@ -139,6 +161,11 @@ const TOOLS = [
         tipo: { type: 'string', enum: ['ingreso', 'gasto'] },
         monto: { type: 'number', description: 'Monto en soles (S/), siempre positivo.' },
         concepto: { type: 'string', description: 'Breve descripción del movimiento.' },
+        categoria: {
+          type: 'string',
+          enum: CATEGORIA_KEYS,
+          description: 'Categoría del movimiento. Si no es obvia, usa "otros".',
+        },
         fecha: {
           type: 'string',
           description: 'Fecha en formato YYYY-MM-DD. Si no se especifica, se usa la de hoy.',
@@ -212,12 +239,13 @@ function rowToMovimiento(row) {
     tipo: row.tipo,
     monto: Number(row.monto),
     concepto: row.concepto,
+    categoria: row.categoria || 'otros',
     fecha: row.fecha,
     confirmado: row.confirmado,
   }
 }
 
-function buildSystemPrompt(state, mood) {
+function buildSystemPrompt(state, mood, profile) {
   const { todos, negocios, finanzas } = state
   const today = todayStr()
   const staleLimit = addDays(today, -3)
@@ -257,7 +285,7 @@ function buildSystemPrompt(state, mood) {
       ? '(sin movimientos confirmados)'
       : confirmados
           .slice(0, 10)
-          .map((m) => `- ${m.fecha} | ${m.tipo} | S/ ${m.monto} | ${m.concepto}`)
+          .map((m) => `- ${m.fecha} | ${m.tipo} | S/ ${m.monto} | ${m.categoria} | ${m.concepto}`)
           .join('\n')
 
   const proyectadosTexto =
@@ -275,7 +303,7 @@ CONTEXTO DE GONZALO:
 - Se está mudando a un departamento propio en Breña.
 - Tiene dos negocios secundarios: venta de lentes Ray-Ban con cámara, y venta de iPhones.
 - Le gusta el contenido de TikTok y los corridos tumbados.
-
+${profile ? `\nPERFIL ACUMULADO (patrones que has notado de Gonzalo a lo largo del tiempo, se actualiza cada semana — úsalo para sonar como que lo conoces de verdad, no lo repitas textual):\n${profile}\n` : ''}
 FECHA DE HOY: ${today}
 
 PENDIENTES ACTUALES (usa el "id" exacto para completar_pendiente / eliminar_pendiente):
@@ -301,7 +329,8 @@ CÓMO DEBES COMPORTARTE:
 - Si no da fecha límite, sugiere tú una fecha razonable según la urgencia y dilo explícitamente en tu respuesta (ej: "le puse fecha para el viernes porque...").
 - Cuando mencione una venta, cobro, cambio de stock, o a cuánto vende cada producto de Ray-Ban/iPhone, usa actualizar_negocio.
 - Si hay pendientes sin fecha creados hace más de 3 días, pregúntale proactivamente qué fecha ponerles.
-- Cuando mencione dinero que YA se movió (ya gastó, ya pagó, ya le depositaron, ya cobró), usa registrar_movimiento con confirmado=true.
+- Si Gonzalo quiere cambiar el texto, prioridad o fecha de un pendiente que ya existe, usa editar_pendiente (no crees uno nuevo).
+- Cuando mencione dinero que YA se movió (ya gastó, ya pagó, ya le depositaron, ya cobró), usa registrar_movimiento con confirmado=true y asígnale una categoria razonable.
 - Cuando mencione algo que PROBABLEMENTE o PLANEA gastar/recibir a futuro (ej: "probablemente gaste 1800 mañana", "voy a cobrar 500 la próxima semana"), usa registrar_movimiento con confirmado=false — es una proyección, NO debe contarse como saldo ya gastado. Ante la duda, usa false.
 - Cuando Gonzalo confirme que una proyección ya sucedió de verdad ("ya gasté eso que dije", "sí se dio el pago"), usa confirmar_movimiento con su id en vez de crear un movimiento nuevo.
 - No listes datos en bruto sin razón: cuando hables de pendientes o negocios, sugiere cómo abordarlos o en qué orden.
@@ -363,6 +392,29 @@ async function executeTool(name, input, state, userId) {
       }
     }
 
+    case 'editar_pendiente': {
+      const cambios = {}
+      if (typeof input.texto === 'string' && input.texto.trim()) cambios.text = input.texto.trim()
+      if (['alta', 'media', 'baja'].includes(input.prioridad)) cambios.priority = input.prioridad
+      if (typeof input.fecha_limite === 'string') cambios.due_date = input.fecha_limite || null
+      if (Object.keys(cambios).length === 0) return { state, result: { ok: false, error: 'nada que editar' } }
+
+      const { data, error } = await supabase
+        .from('todos')
+        .update(cambios)
+        .eq('id', input.id)
+        .eq('user_id', userId)
+        .select()
+        .single()
+      if (error || !data) return { state, result: { ok: false, error: 'id no encontrado' } }
+      const actualizado = rowToTodo(data)
+      logActivity(userId, 'pendiente_editado', { id: actualizado.id, cambios })
+      return {
+        state: { ...state, todos: todos.map((t) => (t.id === actualizado.id ? actualizado : t)) },
+        result: { ok: true, pendiente: actualizado },
+      }
+    }
+
     case 'listar_pendientes': {
       let filtered = todos
       if (input.area && input.area !== 'todas') filtered = filtered.filter((t) => t.area === input.area)
@@ -414,6 +466,7 @@ async function executeTool(name, input, state, userId) {
     }
 
     case 'registrar_movimiento': {
+      const categoria = CATEGORIA_KEYS.includes(input.categoria) ? input.categoria : 'otros'
       const { data, error } = await supabase
         .from('movimientos')
         .insert({
@@ -421,6 +474,7 @@ async function executeTool(name, input, state, userId) {
           tipo: input.tipo === 'ingreso' ? 'ingreso' : 'gasto',
           monto: Number(input.monto) || 0,
           concepto: input.concepto || '',
+          categoria,
           fecha: input.fecha || today,
           confirmado: input.confirmado !== false,
         })
@@ -432,6 +486,7 @@ async function executeTool(name, input, state, userId) {
         id: nuevo.id,
         tipo: nuevo.tipo,
         monto: nuevo.monto,
+        categoria: nuevo.categoria,
         confirmado: nuevo.confirmado,
       })
       return {
@@ -522,9 +577,11 @@ function App() {
   const [todayMood, setTodayMood] = useState(null)
   const [latestInsight, setLatestInsight] = useState(null)
   const [insightsLoading, setInsightsLoading] = useState(false)
+  const [profile, setProfile] = useState(null)
 
   const stateRef = useRef({ todos, negocios, finanzas })
   const moodRef = useRef(null)
+  const profileRef = useRef(null)
   const kickoffFired = useRef(false)
 
   useEffect(() => {
@@ -534,6 +591,10 @@ function App() {
   useEffect(() => {
     moodRef.current = todayMood
   }, [todayMood])
+
+  useEffect(() => {
+    profileRef.current = profile
+  }, [profile])
 
   // --- Auth ---
   useEffect(() => {
@@ -553,6 +614,7 @@ function App() {
         setNegocios(DEFAULT_NEGOCIOS)
         setFinanzas({ movimientos: [] })
         setMessages([])
+        setProfile(null)
         setDataLoaded(false)
         kickoffFired.current = false
       }
@@ -569,7 +631,7 @@ function App() {
       const userId = session.user.id
       const today = todayStr()
 
-      const [todosRes, negociosRes, movRes, msgRes, checkinRes, insightRes] = await Promise.all([
+      const [todosRes, negociosRes, movRes, msgRes, checkinRes, insightRes, profileRes] = await Promise.all([
         supabase.from('todos').select('*').eq('user_id', userId).order('created_at'),
         supabase.from('negocios').select('*').eq('user_id', userId),
         supabase.from('movimientos').select('*').eq('user_id', userId).order('created_at', { ascending: false }),
@@ -582,6 +644,7 @@ function App() {
           .order('created_at', { ascending: false })
           .limit(1)
           .maybeSingle(),
+        supabase.from('jarvis_profile').select('*').eq('user_id', userId).maybeSingle(),
       ])
 
       if (cancelled) return
@@ -616,6 +679,7 @@ function App() {
 
       setTodayMood(checkinRes.data?.mood ?? null)
       setLatestInsight(insightRes.data || null)
+      setProfile(profileRes.data?.resumen || null)
 
       setDataLoaded(true)
     }
@@ -651,7 +715,7 @@ function App() {
     try {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         const response = await callClaude({
-          system: buildSystemPrompt(workingState, moodRef.current),
+          system: buildSystemPrompt(workingState, moodRef.current, profileRef.current),
           tools: TOOLS,
           messages: toApiMessages(currentMessages),
         })
@@ -747,6 +811,25 @@ function App() {
     }
   }
 
+  async function editTodoManual(id, { text, priority, dueDate }) {
+    const cambios = {}
+    if (typeof text === 'string' && text.trim()) cambios.text = text.trim()
+    if (priority) cambios.priority = priority
+    if (dueDate !== undefined) cambios.due_date = dueDate || null
+    if (Object.keys(cambios).length === 0) return
+
+    const { data, error } = await supabase
+      .from('todos')
+      .update(cambios)
+      .eq('id', id)
+      .select()
+      .single()
+    if (!error && data) {
+      setTodos((prev) => prev.map((t) => (t.id === id ? rowToTodo(data) : t)))
+      logActivity(session.user.id, 'pendiente_editado', { id, cambios })
+    }
+  }
+
   async function updateNegocio(productKey, field, rawValue) {
     const value = rawValue === '' ? 0 : Math.max(0, Number(rawValue))
     const next = { ...negocios[productKey], [field]: value }
@@ -765,7 +848,7 @@ function App() {
     logActivity(session.user.id, 'negocio_actualizado', { producto: productKey, campo: field, valor: value })
   }
 
-  async function addMovimiento({ tipo, monto, concepto, confirmado }) {
+  async function addMovimiento({ tipo, monto, concepto, categoria, confirmado }) {
     const userId = session.user.id
     const { data, error } = await supabase
       .from('movimientos')
@@ -774,6 +857,7 @@ function App() {
         tipo,
         monto: Number(monto) || 0,
         concepto,
+        categoria: categoria || 'otros',
         fecha: todayStr(),
         confirmado: confirmado !== false,
       })
@@ -833,22 +917,31 @@ function App() {
               .join('\n')
 
       const prompt =
-        'Analiza esta bitácora de actividad de los últimos 7 días de Gonzalo y dame patrones ' +
-        'concretos y accionables: días más productivos, en qué categorías gasta más, hábitos ' +
-        'que notas. Máximo 6 líneas, directo, sin relleno, en español.\n\n' +
-        resumenTexto
+        'Analiza esta bitácora de actividad de los últimos 7 días de Gonzalo. Responde con ' +
+        'EXACTAMENTE este formato, dos secciones con esos encabezados literales:\n\n' +
+        'PATRONES:\n(patrones concretos y accionables de esta semana: días más productivos, ' +
+        'en qué categorías gasta más, hábitos que notas. Máximo 6 líneas, directo, sin relleno.)\n\n' +
+        'PERFIL_ACTUALIZADO:\n(una versión actualizada del perfil de abajo, fusionando lo que ya ' +
+        'se sabía con lo nuevo de esta semana — no listes semana por semana, escribe un perfil ' +
+        'vivo y breve de quién es Gonzalo y sus patrones, máximo 8 líneas, en tercera persona.)\n\n' +
+        `PERFIL ACTUAL (antes de esta actualización):\n${profileRef.current || '(todavía no hay perfil, este es el primero)'}\n\n` +
+        `BITÁCORA DE LOS ÚLTIMOS 7 DÍAS:\n${resumenTexto}`
 
       const response = await callClaude({
         system: 'Eres JARVIS, el asistente de vida personal de Gonzalo. Responde directo y breve.',
         messages: [{ role: 'user', content: prompt }],
       })
 
-      const contenido =
+      const textoCompleto =
         (response.content || [])
           .filter((b) => b.type === 'text')
           .map((b) => b.text)
           .join('\n')
-          .trim() || 'No pude generar el análisis esta vez.'
+          .trim() || ''
+
+      const partes = textoCompleto.split(/PERFIL_ACTUALIZADO:/i)
+      const contenido = (partes[0] || '').replace(/PATRONES:/i, '').trim() || 'No pude generar el análisis esta vez.'
+      const nuevoPerfil = (partes[1] || '').trim()
 
       const { data } = await supabase
         .from('insights')
@@ -857,6 +950,13 @@ function App() {
         .single()
 
       setLatestInsight(data || { periodo_inicio: desde, periodo_fin: hoy, contenido })
+
+      if (nuevoPerfil) {
+        await supabase
+          .from('jarvis_profile')
+          .upsert({ user_id: userId, resumen: nuevoPerfil, updated_at: new Date().toISOString() })
+        setProfile(nuevoPerfil)
+      }
     } catch {
       // silencioso: si falla, el panel simplemente no se actualiza
     } finally {
@@ -950,6 +1050,7 @@ function App() {
             onToggle={toggleTodo}
             onDelete={deleteTodo}
             onAdd={(payload) => addTodoManual(activeArea.key, payload)}
+            onEdit={editTodoManual}
             extra={
               activeArea.key === 'negocios' ? (
                 <NegociosWidget negocios={negocios} onUpdate={updateNegocio} />
@@ -961,6 +1062,7 @@ function App() {
                     onDelete={deleteMovimiento}
                     onConfirm={confirmMovimiento}
                   />
+                  <CategoryBreakdown movimientos={finanzas.movimientos} />
                   <InsightsPanel
                     insight={latestInsight}
                     loading={insightsLoading}

@@ -5,6 +5,7 @@ import { getBot, sendMessage } from './lib/telegram.js'
 import { handleIncomingMessage } from './lib/brain.js'
 import { runDailySummary } from './cron/dailySummary.js'
 import { runAlertsCheck } from './cron/alerts.js'
+import { startServer } from './server.js'
 
 const REQUIRED_ENV = [
   'TELEGRAM_BOT_TOKEN',
@@ -21,6 +22,17 @@ for (const key of REQUIRED_ENV) {
     process.exit(1)
   }
 }
+
+if (!process.env.WEBHOOK_SECRET) {
+  console.warn(
+    'WEBHOOK_SECRET no está configurado: /health sigue funcionando, pero los avisos ' +
+      'en tiempo real (Supabase Database Webhooks) quedarán rechazados hasta que lo configures.',
+  )
+}
+
+// Servidor HTTP: /health para monitoreo externo, /webhook/supabase para
+// avisos instantáneos (en vez de esperar al cron de 4h).
+startServer()
 
 const AUTHORIZED_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID)
 const bot = getBot()

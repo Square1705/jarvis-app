@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { CATEGORIAS } from '../constants'
 
 function FinanzasWidget({ movimientos, onAdd, onDelete, onConfirm }) {
   const [tipo, setTipo] = useState('gasto')
   const [monto, setMonto] = useState('')
   const [concepto, setConcepto] = useState('')
+  const [categoria, setCategoria] = useState('otros')
   const [confirmado, setConfirmado] = useState(true)
 
   const confirmados = movimientos.filter((m) => m.confirmado)
@@ -22,7 +24,7 @@ function FinanzasWidget({ movimientos, onAdd, onDelete, onConfirm }) {
     e.preventDefault()
     const value = Number(monto)
     if (!value || value <= 0 || !concepto.trim()) return
-    onAdd({ tipo, monto: value, concepto: concepto.trim(), confirmado })
+    onAdd({ tipo, monto: value, concepto: concepto.trim(), categoria, confirmado })
     setMonto('')
     setConcepto('')
   }
@@ -74,6 +76,13 @@ function FinanzasWidget({ movimientos, onAdd, onDelete, onConfirm }) {
           value={concepto}
           onChange={(e) => setConcepto(e.target.value)}
         />
+        <select value={categoria} onChange={(e) => setCategoria(e.target.value)} aria-label="Categoría">
+          {CATEGORIAS.map((c) => (
+            <option key={c.key} value={c.key}>
+              {c.icon} {c.label}
+            </option>
+          ))}
+        </select>
         <button type="submit" aria-label="Registrar movimiento">
           +
         </button>
@@ -96,6 +105,7 @@ function FinanzasWidget({ movimientos, onAdd, onDelete, onConfirm }) {
               <span className="fin-concepto">
                 {!m.confirmado && <span className="chip fin-chip-proyectado">Proyectado</span>}
                 {m.concepto}
+                <span className="fin-categoria">{m.categoria}</span>
               </span>
               <span className="fin-monto">
                 {m.tipo === 'gasto' ? '-' : '+'}S/ {m.monto.toFixed(2)}

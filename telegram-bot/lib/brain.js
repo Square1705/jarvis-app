@@ -1,8 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { getSupabase } from './supabase.js'
-// Reutiliza la misma lista de categorías que el frontend (archivo plano,
-// sin JSX) para que nunca se desincronicen entre web y bot.
-import { CATEGORIA_KEYS } from '../../src/constants.js'
+import { CATEGORIA_KEYS } from './constants.js'
 
 // --- Config ---------------------------------------------------------------
 // Misma lógica que src/App.jsx del frontend (tools, prompt, reglas de
